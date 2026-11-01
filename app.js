@@ -27,7 +27,9 @@
     permScreen: $('permScreen'), permTitle: $('permTitle'), permBody: $('permBody'),
     permHint: $('permHint'), startBtn: $('startBtn'), retryBtn: $('retryBtn'),
     reviewScreen: $('reviewScreen'), shotImg: $('shotImg'), reviewTime: $('reviewTime'),
-    fixText: $('fixText'), retakeBtn: $('retakeBtn'), saveBtn: $('saveBtn'), saveNote: $('saveNote')
+    fixText: $('fixText'), retakeBtn: $('retakeBtn'), saveBtn: $('saveBtn'), saveNote: $('saveNote'),
+    recentWrap: $('recentWrap'), recentStrip: $('recentStrip'), recentCount: $('recentCount'),
+    lpSheet: $('lpSheet'), lpImg: $('lpImg'), lpClose: $('lpClose')
   };
 
   var S = {
@@ -937,6 +939,9 @@
       var url = URL.createObjectURL(blob);
       S.lastShot = { canvas: c, url: url, w: cw, h: ch };
       S.lastBlob = blob;
+      // Persist immediately, before the review screen even paints. If the OS
+      // save fails or the user closes the tab, the photo still exists.
+      idbPut(blob, { w: cw, h: ch, fx: S.fx.mode }).then(function () { refreshRecent(); });
       showReview(url, c, blob);
     }, 'image/jpeg', 0.9);
   }
@@ -1040,7 +1045,7 @@
     el.fixText.textContent = fixes[0].s > 82 ? 'Nothing major — this one is solid.' : fixes[0].t;
 
     el.saveNote.textContent = canShareFiles()
-      ? 'Saving opens your phone\u2019s share sheet — choose \u201cSave Image\u201d to put it in your gallery.'
+      ? 'Saving opens your phone’s share sheet — choose “Save Image” to put it in your gallery.'
       : 'Your browser cannot share files directly, so this downloads the photo instead.';
   }
 
@@ -1069,32 +1074,147 @@
     } catch (e) { return false; }
   }
 
-  function saveShot() {
-    if (!S.lastBlob) { toast('Nothing to save yet'); return; }
-    var name = 'framewise-' + Date.now() + '.jpg';
-    var file = new File([S.lastBlob], name, { type: 'image/jpeg' });
+  var isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+              (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+  function shotName() {
+    var d = new Date();
+    function p(n) { return (n < 10 ? '0' : '') + n; }
+    return 'framewise-' + d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+           '-' + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) + '.jpg';
+  }
+
+  /* Saving must never fail silently. Three routes, best first:
+   *   1. navigator.share({files}) -> share sheet -> "Save Image"  (iOS + Android)
+   *   2. <a download>             -> Downloads folder             (desktop, Android)
+   *   3. long-press sheet         -> "Save to Photos"             (iOS Safari, where
+   *                                  a.download is ignored and opens a new tab)
+   * Every route ends in a visible toast. A cancelled share is NOT an error.
+   */
+  function saveShot(blob) {
+    blob = blob || S.lastBlob;
+    if (!blob) { toast('Nothing to save yet'); return; }
+    var name = shotName();
+    var file;
+    try { file = new File([blob], name, { type: 'image/jpeg' }); }
+    catch (e) { file = blob; }   // very old Safari has no File constructor
 
     if (canShareFiles()) {
       navigator.share({ files: [file], title: 'Framewise' }).then(function () {
-        toast('Shared — pick \u201cSave Image\u201d');
+        toast('Shared — choose “Save Image” to keep it');
       }).catch(function (err) {
-        if (err && err.name === 'AbortError') return;
-        downloadFallback(file, name);
+        var n = err && err.name;
+        // Dismissing the share sheet is a choice, not a failure.
+        if (n === 'AbortError') { toast('Cancelled — nothing was saved'); return; }
+        // NotAllowedError / NotSupportedError / anything else: fall through.
+        downloadFallback(blob, name);
       });
-    } else {
-      downloadFallback(file, name);
+      return;
     }
+    downloadFallback(blob, name);
   }
 
-  function downloadFallback(file, name) {
-    var url = URL.createObjectURL(file);
+  function downloadFallback(blob, name) {
+    // iOS Safari ignores the download attribute on blob: URLs and opens the
+    // image in a new tab instead, which saves nothing. Show the long-press
+    // route there rather than claiming a download that never happened.
+    if (isIOS) { showLongPress(blob); return; }
+
+    var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
-    a.href = url; a.download = name;
+    a.href = url; a.download = name; a.rel = 'noopener';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
-    toast('Downloaded to your device');
+    // Revoking too early kills the download before it starts. 60s is generous
+    // and the blob is small; the browser has long finished by then.
+    setTimeout(function () { URL.revokeObjectURL(url); }, 60000);
+    toast('Download started — check your Downloads');
+  }
+
+  function showLongPress(blob) {
+    if (el.lpImg.dataset.url) URL.revokeObjectURL(el.lpImg.dataset.url);
+    var u = URL.createObjectURL(blob);
+    el.lpImg.dataset.url = u;
+    el.lpImg.src = u;
+    el.lpSheet.classList.add('on');
+    toast('Long-press the photo → Save to Photos');
+  }
+
+  /* ------------------------------------------------------------ recent shots
+   * The photo must survive a failed save. IndexedDB keeps the last 12 shots as
+   * blobs, so a reload, a crash or a dismissed share sheet never loses it.
+   */
+  var DB_NAME = 'framewise', DB_STORE = 'shots', dbPromise = null;
+
+  function db() {
+    if (dbPromise) return dbPromise;
+    dbPromise = new Promise(function (resolve, reject) {
+      if (!window.indexedDB) { reject(new Error('no idb')); return; }
+      var req = indexedDB.open(DB_NAME, 1);
+      req.onupgradeneeded = function () {
+        var d = req.result;
+        if (!d.objectStoreNames.contains(DB_STORE)) {
+          d.createObjectStore(DB_STORE, { keyPath: 'id', autoIncrement: true });
+        }
+      };
+      req.onsuccess = function () { resolve(req.result); };
+      req.onerror = function () { reject(req.error); };
+    }).catch(function (e) { dbPromise = null; throw e; });
+    return dbPromise;
+  }
+
+  function idbPut(blob, meta) {
+    return db().then(function (d) {
+      return new Promise(function (res, rej) {
+        var tx = d.transaction(DB_STORE, 'readwrite');
+        tx.objectStore(DB_STORE).add({ blob: blob, at: Date.now(), meta: meta || {} });
+        tx.oncomplete = function () { res(true); };
+        tx.onerror = function () { rej(tx.error); };
+      });
+    }).catch(function () { return false; });
+  }
+
+  function idbAll() {
+    return db().then(function (d) {
+      return new Promise(function (res, rej) {
+        var out = [];
+        var tx = d.transaction(DB_STORE, 'readonly');
+        var cur = tx.objectStore(DB_STORE).openCursor();
+        cur.onsuccess = function () {
+          var c = cur.result;
+          if (c) { out.push(c.value); c.continue(); } else { res(out.reverse()); }
+        };
+        cur.onerror = function () { rej(cur.error); };
+      });
+    }).catch(function () { return []; });
+  }
+
+  var recentUrls = [];
+
+  function renderRecent(shots) {
+    recentUrls.forEach(function (u) { URL.revokeObjectURL(u); });
+    recentUrls = [];
+    el.recentStrip.innerHTML = '';
+    if (!shots.length) { el.recentWrap.hidden = true; return; }
+    el.recentWrap.hidden = false;
+    el.recentCount.textContent = shots.length + (shots.length === 1 ? ' shot' : ' shots');
+    shots.forEach(function (s) {
+      var u = URL.createObjectURL(s.blob);
+      recentUrls.push(u);
+      var b = document.createElement('button');
+      b.className = 'thumb';
+      b.setAttribute('aria-label', 'Save this photo');
+      var img = document.createElement('img');
+      img.src = u; img.alt = '';
+      b.appendChild(img);
+      b.addEventListener('click', function () { saveShot(s.blob); });
+      el.recentStrip.appendChild(b);
+    });
+  }
+
+  function refreshRecent() {
+    idbAll().then(function (shots) { renderRecent(shots.slice(0, 12)); });
   }
 
   /* ------------------------------------------------------------ fx controls */
@@ -1118,8 +1238,8 @@
     if (S.fx.mode === 'off') { el.fxNote.hidden = true; return; }
     var pct = Math.round(S.fx.strength * 100);
     el.fxNote.hidden = false;
-    el.fxNote.textContent = (S.fx.auto ? 'Auto' : 'Fixed') + ' blur \u00b7 ' + pct + '%' +
-      (S.fx.lowPower ? ' \u00b7 low-power' : '');
+    el.fxNote.textContent = (S.fx.auto ? 'Auto' : 'Fixed') + ' blur · ' + pct + '%' +
+      (S.fx.lowPower ? ' · low-power' : '');
   }
 
   // Auto strength: a real fast lens blurs more as the subject gets closer.
@@ -1213,7 +1333,11 @@
     S.lastShot = null; S.lastBlob = null;
     if (S.running) startRenderLoop();
   });
-  el.saveBtn.addEventListener('click', saveShot);
+  el.saveBtn.addEventListener('click', function () { saveShot(); });
+  el.lpClose.addEventListener('click', function () {
+    el.lpSheet.classList.remove('on');
+  });
+  refreshRecent();
 
   // Expose read-only state for automated testing. Harmless in production.
   window.__framewise = S;
