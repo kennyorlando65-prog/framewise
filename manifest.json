@@ -1,1 +1,17 @@
-__MANIFEST__
+{
+  "name": "Framewise — the camera that coaches you",
+  "short_name": "Framewise",
+  "description": "A camera that tells you what to fix before you shoot. Level, steadiness, exposure and framing, checked live on your phone.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0A0B0D",
+  "theme_color": "#0A0B0D",
+  "categories": ["photo", "utilities", "productivity"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
