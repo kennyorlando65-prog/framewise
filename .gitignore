@@ -1,1 +1,27 @@
-__GITIGNORE__
+# dependencies
+node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# build output
+dist/
+build/
+.vercel/
+.next/
+out/
+
+# local QA harness and screenshots (not part of the app)
+qa-*/
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# env (this app needs none, but never commit one)
+.env
+.env.*
