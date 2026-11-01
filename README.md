@@ -4,123 +4,39 @@ A camera that coaches you while you shoot. Level, steadiness, exposure and frami
 checked live on your phone, and the app tells you the single worst problem in the frame —
 one instruction at a time.
 
-**Framewise is a photo app.** There is no video recording, no video export and no record
-button. The camera feed is a viewfinder; the only output is one still JPEG.
+**This is a photo app.** There is no video recording, no `MediaRecorder`, no video export.
+The camera feed is a viewfinder only; the single output is one JPEG still.
 
 Static site. No backend, no database, no API keys, no environment variables.
 
 ---
 
-## What it does
+## Saving a photo
 
-**Live coaching** — one instruction at a time, never a wall of warnings:
+Saving has three routes, tried best-first, and **every route ends in a visible message** —
+the app never silently does nothing.
 
-- **Level** — device roll, with a horizon bar that turns green within 1°
-- **Stability** — accelerometer variance over a rolling 1.2s window, shown as a ring
-  around the shutter; auto-capture fires after 600ms steady
-- **Exposure** — luminance histogram sampled from the frame; catches blown highlights and
-  crushed shadows
-- **Framing** — rule-of-thirds grid, plus face position and size
-- **Subject vs background light** — the real lighting coach: "Background is 2.1 stops
-  brighter than your subject"
-- **Golden hour** — SunCalc + geolocation, in a corner chip. Hidden silently if denied.
+| Route | When it is used | What you see |
+|---|---|---|
+| Share sheet | `navigator.canShare({files})` is true (iOS Safari, Android Chrome) | "Shared — choose Save Image to keep it" |
+| Download | No share support (desktop, some Android) | "Download started — check your Downloads" |
+| Long-press sheet | iOS Safari without share support | A full-size image + "Long-press → Save to Photos" |
 
-**Portrait / bokeh** — Off / Portrait / Studio, using the selfie segmentation mask:
+**On Android:** tap **Save photo** → the share sheet opens → choose **Save Image** (or
+Photos/Files). The photo lands in your gallery.
 
-- background blurred at 1/4 resolution then upscaled, subject composited back sharp
-- mask alpha feathered so the cutout edge is not a razor line
-- **auto strength** — closer subject (larger face in frame) means stronger blur, the way a
-  real fast lens behaves
-- **baked into the saved file**, not just the preview: the viewfinder and the capture call
-  the same `drawComposed()` function
+**On iPhone:** tap **Save photo** → share sheet → **Save Image**. It goes to Photos.
+If the share sheet is unavailable, a full-size image opens — long-press it and choose
+**Save to Photos**.
 
-**Adjustments** — exposure, contrast and warmth sliders, applied through the same canvas
-pipeline (so they are real, not CSS overlays pretending to be camera effects).
+**Cancelling the share sheet is not an error.** It shows "Cancelled — nothing was saved"
+and the photo stays in the app.
 
-**Capture** — shutter, post-shot critique (level / sharpness / exposure / composition),
-one thing to fix, then save via the share sheet or a download.
+### Recent shots — the safety net
 
----
-
-## Run it locally
-
-The camera needs a secure origin. `localhost` counts.
-
-```bash
-cd framewise
-python3 -m http.server 8000
-# open http://localhost:8000
-```
-
-Do **not** open `index.html` by double-clicking it — `file://` is not a secure origin and
-the browser will refuse the camera. The app detects this and tells you so.
-
----
-
-## Deploy to Vercel
-
-Zero config. No build step, no framework, no environment variables.
-
-**From the dashboard:** go to [vercel.com/new](https://vercel.com/new), drag this folder
-onto the page, Deploy.
-
-**From the CLI:**
-```bash
-npx vercel --prod
-```
-
-**From GitHub:** import the repo at [vercel.com/new](https://vercel.com/new) and accept the
-defaults — Vercel detects a static site and serves it as-is.
-
-⚠️ **The camera only works on the deployed HTTPS URL.** Open the Vercel URL on your phone,
-not a local file.
-
----
-
-## Browser support and caveats
-
-| Requirement | Why |
-|---|---|
-| **HTTPS** | `getUserMedia` is blocked on insecure origins. `localhost` is exempt. |
-| **A user gesture for iOS motion** | iOS 13+ requires `DeviceOrientationEvent.requestPermission()` to be called from a tap. Framewise chains it off the Start button. |
-| **WebGL for MediaPipe** | The face landmarker and segmenter need WebGL. Without it the AI coach reports "off" and the app falls back to sensor-only coaching. |
-| **`navigator.share` for the gallery** | On iOS/Android the share sheet → "Save Image" is how a photo reaches the gallery. Without it, the app downloads the file instead. |
-
-If MediaPipe cannot load (offline, blocked CDN, old browser) the app **still works** — it
-coaches on sensors alone and the Portrait toggle is disabled with a visible reason.
-
----
-
-## Known limitations
-
-**The bokeh is a guess, not a depth measurement.** A real lens blurs by optical depth. This
-blurs by a segmentation mask, which is a 2D outline. Consequences:
-
-- **Hair edges** will show a halo or a hard fringe — the mask cannot resolve individual
-  strands
-- **Glasses** often get partially masked, so the frames can stay sharp while the face
-  behind them blurs, or vice versa
-- **Thin objects** (a raised hand, a phone, a plant stem) may be cut off or blurred
-- **Two people at different distances** get the same blur — there is no depth ordering
-- The effect is strongest on a clean, well-lit, single subject against a distinct background
-
-**Performance is the real risk.** Segmentation is the expensive part. The pipeline is built
-to survive a slow device (720p viewfinder, quarter-res blur, ~12fps mask, automatic
-low-power fallback), but the effect is genuinely heavy. On a low-end Android expect the
-low-power path to engage.
-
-**Sharpness scoring is uncalibrated.** The Laplacian variance implementation is correct,
-but the normaliser (`/24`) is a guess. It will rank a sharp shot above a soft one; the
-absolute number is not meaningful yet.
-
-**Composition is only scored when a face is detected.** No face means `n/a`, not a made-up
-number. Framewise is a portrait coach, not a general photo coach.
-
-**The coach sees one problem at a time by design.** The priority order (exposure > level >
-stability > framing) is a judgement call, not a tested one. "Too bright behind" will
-dominate many scenes and can mask a tilted horizon.
-
-**No sun mode.** The UI is dark, which is right for the preview and wrong at noon outdoors.
+Every capture is written to **IndexedDB before the review screen paints**, so the photo
+survives a failed save, a dismissed share sheet, a reload or a crash. The last 12 shots
+appear in a strip on the review screen; tap any thumbnail to save it again.
 
 ---
 
@@ -128,12 +44,87 @@ dominate many scenes and can mask a tilted horizon.
 
 ```
 index.html      markup + all CSS (colour tokens at the top of <style>)
-app.js          camera, sensors, histogram, MediaPipe, effects pipeline, capture
+app.js          camera, sensors, histogram, MediaPipe, effects pipeline, capture, save
 manifest.json   PWA manifest
 sw.js           offline app shell (never caches the AI models)
 icons/          192, 512, maskable 512, apple-touch
 AUDIT.md        the code audit: bugs found, before/after, measurements
 ```
+
+---
+
+## Run locally
+
+Camera needs a secure context. `localhost` counts, `file://` does not.
+
+```bash
+python3 -m http.server 8080
+# open http://localhost:8080
+```
+
+Opening `index.html` by double-clicking will show the "Camera needs HTTPS" screen — that
+is the app working as designed, not a bug.
+
+---
+
+## Deploy to Vercel
+
+Zero config. No build step, no framework preset, no environment variables.
+
+**Import the repo:** [vercel.com/new](https://vercel.com/new) → Import Git Repository →
+`kennyorlando65-prog/framewise` → Framework preset **Other**, build command **none**,
+output directory **blank** → Deploy.
+
+**Or drag-and-drop:** drag this folder onto [vercel.com/new](https://vercel.com/new).
+`index.html` must be at the root of what you upload.
+
+**Or CLI:** `npx vercel --prod` from inside this folder.
+
+Then **open the `https://` URL on your phone**. The camera will not work on a local file.
+
+---
+
+## Browser support and caveats
+
+- **Camera requires HTTPS.** `getUserMedia` is blocked on insecure origins. Deployed
+  Vercel URL or `localhost` only.
+- **iOS motion permission needs a user gesture.** `DeviceOrientationEvent.requestPermission()`
+  must be called from a tap. Framewise chains it off the Start button. If the prompt is
+  dismissed, the level line and stability meter stay inactive and the app still shoots.
+- **MediaPipe needs WebGL.** The face landmarker and selfie segmenter load from a CDN and
+  run on the GPU delegate. If WebGL is unavailable or the CDN is blocked, the app degrades
+  to sensor-only coaching, shows "AI coach off", and disables the Portrait toggle with a
+  visible reason.
+- **Portrait/bokeh is a segmentation effect, not depth.** See limitations below.
+
+---
+
+## Known limitations
+
+**Portrait mode is a mask, not a lens.** A real lens blurs by depth — every point gets a
+blur radius proportional to its true distance from the focal plane. Framewise blurs by a
+2D outline guessing which pixels are "person". Consequences: hair edges show a halo or a
+hard fringe, glasses are often half-masked, thin objects (a raised hand, a plant stem) get
+clipped at the mask edge, and two people at different distances get identical blur. It is
+convincing on a clean single subject against a distinct background and unconvincing the
+moment hair, glasses or a cluttered edge enters the frame.
+
+**Segmentation is expensive.** On a CPU-only path one pass costs seconds. The app throttles
+the mask to ~12fps, blurs the background at quarter resolution, and drops to a 480p
+low-power viewfinder when a single pass exceeds 900ms. Measure the real FPS on your target
+phone before relying on the effect.
+
+**Sharpness scoring is uncalibrated.** The Laplacian variance implementation is correct and
+ranks shots sensibly, but the normaliser is a guess — the absolute number is not meaningful.
+
+**Composition only scores when a face is found.** No face means `n/a`, not an invented
+number. Framewise is a portrait coach, not a general photo coach.
+
+**The coach shows one problem at a time by design.** The priority order (exposure > level >
+stability > framing) is a judgement call, not a tested one. "Too bright behind" will
+dominate many scenes and can mask a tilted horizon.
+
+**No sun mode.** The UI is dark, which is right for the preview and wrong at noon outdoors.
 
 ---
 
